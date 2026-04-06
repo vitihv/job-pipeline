@@ -320,15 +320,44 @@ Analyze the job description and return ONLY valid JSON (no markdown, no preamble
 const CV_SYSTEM=`You are an elite executive CV writer. You tailor CVs for specific roles without fabricating experience.
 Candidate base CV:
 ${BASE_CV}
+
+Given the job description, return ONLY a valid JSON object (no markdown, no preamble) with this exact structure:
+{
+  "name": "Víctor Herranz Villagrán",
+  "contact": "vherranz@outlook.com | +34 620072033 | Spain | linkedin.com/in/victorherranzvillagran",
+  "title": "tailored job title line e.g. Customer Operations Director",
+  "summary": "3-4 sentence professional summary tailored to this role",
+  "achievements": ["achievement bullet 1", "achievement bullet 2", "achievement bullet 3", "achievement bullet 4"],
+  "expertise": ["skill1", "skill2", "skill3", "skill4", "skill5", "skill6", "skill7", "skill8", "skill9", "skill10"],
+  "experience": [
+    {
+      "company": "N26",
+      "location": "Madrid, Spain",
+      "period": "Jan 2026–Present",
+      "roles": [
+        {
+          "title": "Customer Operations, Retention Lead",
+          "bullets": ["rewritten bullet 1", "rewritten bullet 2", "rewritten bullet 3", "rewritten bullet 4"]
+        }
+      ]
+    }
+  ],
+  "education": [
+    "Masters Degree, Customer Experience Innovation — UNIR, Spain (2024)",
+    "Diploma in Big Data for Business — Dublin Business School, Ireland (2018)",
+    "Bachelor of Education — Universidad de Valladolid, Spain (2002–2006)"
+  ],
+  "languages": "Spanish (native), English (fluent / C1)",
+  "tools": "Zendesk, Salesforce Service Cloud, Tableau, Power BI, Looker, Jira, Advanced Excel"
+}
+
 Rules:
 - Keep all facts, dates, companies, and metrics 100% accurate — never invent anything
-- Rewrite the professional summary (3-4 sentences) to speak directly to this role's priorities
-- Reorder and rewrite bullet points within each role to emphasise most relevant experience first
-- Mirror keywords from the JD naturally throughout
-- Keep education and languages/tools sections unchanged
-- Output clean plain text with section headers, ready to copy into Google Docs
-- Structure: CONTACT INFO | PROFESSIONAL SUMMARY | KEY ACHIEVEMENTS | EXPERTISE | PROFESSIONAL EXPERIENCE | EDUCATION | LANGUAGES & TOOLS
-Return ONLY the CV text. No preamble, no explanation, no markdown.`;
+- Rewrite summary and bullets to mirror the JD keywords naturally
+- Reorder bullets within each role to lead with most relevant experience
+- Include ALL roles from the base CV in the experience array
+- Keep education, languages and tools unchanged
+- Return ONLY the JSON object`;
 
 const STATUSES=['Saved','Analysed','Applied','Interview','Offer','Pass'];
 let roles=[],selectedId=null,currentTab='details',currentView='board',filterStatus='All';
@@ -551,28 +580,120 @@ async function generateCV(){
   const btn=document.getElementById('btn-generate'),prog=document.getElementById('cv-progress');
   btn.disabled=true;btn.textContent='⏳ Generating…';prog.classList.add('visible');
   try{
-    // Generate tailored CV text
-    const cvText=await callClaude(CV_SYSTEM,'Job Description:\n\n'+role.jd+'\n\nGenerate the tailored CV now.',3000);
+    // Step 1: Generate structured CV JSON
+    const raw=await callClaude(CV_SYSTEM,'Job Description:\n\n'+role.jd+'\n\nGenerate the tailored CV JSON now.',3000);
+    const cv=JSON.parse(raw.replace(/```json|```/g,'').trim());
 
-    // Create Google Doc
-    const title=`CV – ${role.roleTitle||'Role'} – ${role.company||'Company'} – Victor Herranz`;
+    // Step 2: Create Google Doc
+    const docTitle=`CV – ${role.roleTitle||'Role'} – ${role.company||'Company'} – Victor Herranz`;
     const createRes=await fetch('https://docs.googleapis.com/v1/documents',{
       method:'POST',
       headers:{'Authorization':'Bearer '+googleAccessToken,'Content-Type':'application/json'},
-      body:JSON.stringify({title})
+      body:JSON.stringify({title:docTitle})
     });
-    if(!createRes.ok){const e=await createRes.text();throw new Error('Google Docs error: '+e);}
+    if(!createRes.ok){const e=await createRes.text();throw new Error('Google Docs: '+e);}
     const doc=await createRes.json();
+    const docId=doc.documentId;
 
-    // Insert CV content
-    const insertRes=await fetch(`https://docs.googleapis.com/v1/documents/${doc.documentId}:batchUpdate`,{
+    // Step 3: Build content string + formatting requests
+    const requests=[];
+    let text='';
+    const addText=(t)=>{text+=t;};
+
+    // Helper: record a formatting request for a range within the accumulated text
+    // We'll collect all text first, insert once, then format
+    const segments=[]; // {text, type, bold, size, color, indent}
+
+    const seg=(t,type='body',bold=false,size=11,color=null,indent=false)=>{
+      segments.push({t,type,bold,size,color,indent});
+    };
+
+    // NAME
+    seg(cv.name+'\n','name',true,20,'1155CC');
+    // TITLE
+    seg(cv.title+'\n','title',false,13,'444444');
+    // CONTACT
+    seg(cv.contact+'\n\n','body',false,10,'666666');
+
+    // SUMMARY
+    seg('PROFESSIONAL SUMMARY\n','heading',true,11,'1155CC');
+    seg(cv.summary+'\n\n','body',false,11);
+
+    // ACHIEVEMENTS
+    seg('KEY ACHIEVEMENTS\n','heading',true,11,'1155CC');
+    cv.achievements.forEach(a=>seg('• '+a+'\n','body',false,11));
+    seg('\n','body');
+
+    // EXPERTISE
+    seg('EXPERTISE\n','heading',true,11,'1155CC');
+    seg(cv.expertise.join(' | ')+'\n\n','body',false,10,'333333');
+
+    // EXPERIENCE
+    seg('PROFESSIONAL EXPERIENCE\n','heading',true,11,'1155CC');
+    cv.experience.forEach(exp=>{
+      seg(exp.company+', '+exp.location+' | '+exp.period+'\n','company',true,11);
+      exp.roles.forEach(r=>{
+        seg(r.title+'\n','role',false,11,'444444');
+        r.bullets.forEach(b=>seg('• '+b+'\n','body',false,11));
+      });
+      seg('\n','body');
+    });
+
+    // EDUCATION
+    seg('EDUCATION\n','heading',true,11,'1155CC');
+    cv.education.forEach(e=>seg('• '+e+'\n','body',false,11));
+    seg('\n','body');
+
+    // LANGUAGES & TOOLS
+    seg('LANGUAGES & TOOLS\n','heading',true,11,'1155CC');
+    seg('Languages: '+cv.languages+'\n','body',false,11);
+    seg('Tools: '+cv.tools+'\n','body',false,11);
+
+    // Build full text
+    const fullText=segments.map(s=>s.t).join('');
+
+    // Insert all text at once
+    const insertReq=[{insertText:{location:{index:1},text:fullText}}];
+
+    // Build formatting requests using character positions
+    const fmtRequests=[];
+    let idx=1; // Google Docs index starts at 1
+    segments.forEach(s=>{
+      const len=s.t.length;
+      const end=idx+len;
+      if(s.type==='name'){
+        fmtRequests.push({updateTextStyle:{range:{startIndex:idx,endIndex:end},textStyle:{bold:true,fontSize:{magnitude:20,unit:'PT'},foregroundColor:{color:{rgbColor:{red:0.067,green:0.333,blue:0.8}}}},fields:'bold,fontSize,foregroundColor'}});
+        fmtRequests.push({updateParagraphStyle:{range:{startIndex:idx,endIndex:end},paragraphStyle:{spaceAbove:{magnitude:0,unit:'PT'},spaceBelow:{magnitude:2,unit:'PT'}},fields:'spaceAbove,spaceBelow'}});
+      } else if(s.type==='title'){
+        fmtRequests.push({updateTextStyle:{range:{startIndex:idx,endIndex:end},textStyle:{fontSize:{magnitude:13,unit:'PT'},foregroundColor:{color:{rgbColor:{red:0.267,green:0.267,blue:0.267}}}},fields:'fontSize,foregroundColor'}});
+      } else if(s.type==='heading'){
+        fmtRequests.push({updateTextStyle:{range:{startIndex:idx,endIndex:end},textStyle:{bold:true,fontSize:{magnitude:10,unit:'PT'},foregroundColor:{color:{rgbColor:{red:0.067,green:0.333,blue:0.8}}}},fields:'bold,fontSize,foregroundColor'}});
+        fmtRequests.push({updateParagraphStyle:{range:{startIndex:idx,endIndex:end},paragraphStyle:{spaceAbove:{magnitude:10,unit:'PT'},borderBottom:{color:{color:{rgbColor:{red:0.067,green:0.333,blue:0.8}}},width:{magnitude:1,unit:'PT'},padding:{magnitude:2,unit:'PT'},dashStyle:'SOLID'}},fields:'spaceAbove,borderBottom'}});
+      } else if(s.type==='company'){
+        fmtRequests.push({updateTextStyle:{range:{startIndex:idx,endIndex:end},textStyle:{bold:true,fontSize:{magnitude:11,unit:'PT'}},fields:'bold,fontSize'}});
+        fmtRequests.push({updateParagraphStyle:{range:{startIndex:idx,endIndex:end},paragraphStyle:{spaceAbove:{magnitude:6,unit:'PT'}},fields:'spaceAbove'}});
+      } else if(s.type==='role'){
+        fmtRequests.push({updateTextStyle:{range:{startIndex:idx,endIndex:end},textStyle:{italic:true,fontSize:{magnitude:11,unit:'PT'},foregroundColor:{color:{rgbColor:{red:0.267,green:0.267,blue:0.267}}}},fields:'italic,fontSize,foregroundColor'}});
+      }
+      idx=end;
+    });
+
+    // Apply insert then format
+    const batchRes=await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`,{
       method:'POST',
       headers:{'Authorization':'Bearer '+googleAccessToken,'Content-Type':'application/json'},
-      body:JSON.stringify({requests:[{insertText:{location:{index:1},text:cvText}}]})
+      body:JSON.stringify({requests:[...insertReq,...fmtRequests]})
     });
-    if(!insertRes.ok){const e=await insertRes.text();throw new Error('Insert error: '+e);}
+    if(!batchRes.ok){const e=await batchRes.text();throw new Error('Formatting error: '+e);}
 
-    role.cvDocUrl=`https://docs.google.com/document/d/${doc.documentId}/edit`;
+    // Set document margins
+    await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`,{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+googleAccessToken,'Content-Type':'application/json'},
+      body:JSON.stringify({requests:[{updateDocumentStyle:{documentStyle:{marginTop:{magnitude:72,unit:'PT'},marginBottom:{magnitude:72,unit:'PT'},marginLeft:{magnitude:72,unit:'PT'},marginRight:{magnitude:72,unit:'PT'}},fields:'marginTop,marginBottom,marginLeft,marginRight'}}]})
+    });
+
+    role.cvDocUrl=`https://docs.google.com/document/d/${docId}/edit`;
     saveRole_db(role);renderPanel(role);renderList();
   }catch(e){
     alert(e.name==='AbortError'?'Timed out generating CV.':'CV generation failed: '+e.message);
