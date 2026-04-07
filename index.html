@@ -393,9 +393,8 @@ window.addEventListener('DOMContentLoaded',()=>{
   renderFilters();
 });
 
-// GOOGLE AUTH
+// GOOGLE AUTH — always request fresh token before Docs calls, no silent refresh
 let googleTokenClient=null;
-let googleTokenExpiry=0; // timestamp ms when token expires
 
 function initGoogleClient(){
   if(googleTokenClient)return;
@@ -404,7 +403,6 @@ function initGoogleClient(){
     callback:(r)=>{
       if(r.access_token){
         googleAccessToken=r.access_token;
-        googleTokenExpiry=Date.now()+(((r.expires_in||3500)-60)*1000); // expire 60s early
         const role=roles.find(x=>x.id===selectedId);
         if(role)renderPanel(role);
       }
@@ -414,37 +412,30 @@ function initGoogleClient(){
 
 function signInWithGoogle(){
   initGoogleClient();
-  googleTokenClient.requestAccessToken({prompt:googleAccessToken?'':'select_account'});
+  googleTokenClient.requestAccessToken({prompt:'select_account'});
 }
 
-// Returns a valid token, refreshing silently if needed
-function getFreshToken(){
+// Always gets a fresh token via popup before making Docs API calls
+function getToken(){
   return new Promise((resolve,reject)=>{
     initGoogleClient();
-    // If token exists and not expired, return it immediately
-    if(googleAccessToken && Date.now()<googleTokenExpiry){
-      return resolve(googleAccessToken);
-    }
-    // Need fresh token — override callback temporarily
-    const original=googleTokenClient.callback;
+    const prev=googleTokenClient.callback;
     googleTokenClient.callback=(r)=>{
-      googleTokenClient.callback=original;
+      googleTokenClient.callback=prev;
       if(r.access_token){
         googleAccessToken=r.access_token;
-        googleTokenExpiry=Date.now()+(((r.expires_in||3500)-60)*1000);
-        resolve(googleAccessToken);
+        resolve(r.access_token);
       } else {
-        reject(new Error('Google sign-in failed or was cancelled.'));
+        reject(new Error('Google sign-in cancelled or failed.'));
       }
     };
-    googleTokenClient.requestAccessToken({prompt:googleAccessToken?'none':'select_account'});
+    googleTokenClient.requestAccessToken({prompt:''});
   });
 }
 
 async function googleFetch(url,opts){
-  const token=await getFreshToken();
-  const res=await fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+token}});
-  return res;
+  const token=await getToken();
+  return fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+token}});
 }
 
 // HELPERS
@@ -621,7 +612,7 @@ async function runAnalysis(){
 async function generateCV(){
   const role=roles.find(r=>r.id===selectedId);if(!role)return;
   if(!role.jd)return alert('No job description found.');
-  if(!googleAccessToken){signInWithGoogle();return alert('Please sign in with Google and try again.');}
+  // Token will be requested fresh inside googleFetch via getToken()
   const btn=document.getElementById('btn-generate'),prog=document.getElementById('cv-progress');
   btn.disabled=true;btn.textContent='⏳ Generating…';prog.classList.add('visible');
   try{
