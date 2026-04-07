@@ -394,12 +394,38 @@ window.addEventListener('DOMContentLoaded',()=>{
 });
 
 // GOOGLE AUTH
-function signInWithGoogle(){
-  const client=google.accounts.oauth2.initTokenClient({
+let googleTokenClient=null;
+let googleTokenCallback=null;
+
+function initGoogleClient(){
+  if(googleTokenClient)return;
+  googleTokenClient=google.accounts.oauth2.initTokenClient({
     client_id:GOOGLE_CLIENT_ID,scope:GOOGLE_SCOPES,
-    callback:(r)=>{if(r.access_token){googleAccessToken=r.access_token;const role=roles.find(x=>x.id===selectedId);if(role)renderPanel(role);}}
+    callback:(r)=>{
+      if(r.access_token){
+        googleAccessToken=r.access_token;
+        const role=roles.find(x=>x.id===selectedId);
+        if(role)renderPanel(role);
+        if(googleTokenCallback){googleTokenCallback();googleTokenCallback=null;}
+      }
+    }
   });
-  client.requestAccessToken();
+}
+
+function signInWithGoogle(cb){
+  initGoogleClient();
+  if(cb)googleTokenCallback=cb;
+  googleTokenClient.requestAccessToken({prompt:googleAccessToken?'':'select_account'});
+}
+
+async function googleFetch(url,opts){
+  // Try request; if 401, refresh token and retry once
+  let res=await fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+googleAccessToken}});
+  if(res.status===401){
+    await new Promise(resolve=>signInWithGoogle(resolve));
+    res=await fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+googleAccessToken}});
+  }
+  return res;
 }
 
 // HELPERS
@@ -586,9 +612,9 @@ async function generateCV(){
 
     // Step 2: Create Google Doc
     const docTitle=`CV – ${role.roleTitle||'Role'} – ${role.company||'Company'} – Victor Herranz`;
-    const createRes=await fetch('https://docs.googleapis.com/v1/documents',{
+    const createRes=await googleFetch('https://docs.googleapis.com/v1/documents',{
       method:'POST',
-      headers:{'Authorization':'Bearer '+googleAccessToken,'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json'},
       body:JSON.stringify({title:docTitle})
     });
     if(!createRes.ok){const e=await createRes.text();throw new Error('Google Docs: '+e);}
@@ -679,17 +705,17 @@ async function generateCV(){
     });
 
     // Apply insert then format
-    const batchRes=await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`,{
+    const batchRes=await googleFetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`,{
       method:'POST',
-      headers:{'Authorization':'Bearer '+googleAccessToken,'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json'},
       body:JSON.stringify({requests:[...insertReq,...fmtRequests]})
     });
     if(!batchRes.ok){const e=await batchRes.text();throw new Error('Formatting error: '+e);}
 
     // Set document margins
-    await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`,{
+    await googleFetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`,{
       method:'POST',
-      headers:{'Authorization':'Bearer '+googleAccessToken,'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json'},
       body:JSON.stringify({requests:[{updateDocumentStyle:{documentStyle:{marginTop:{magnitude:72,unit:'PT'},marginBottom:{magnitude:72,unit:'PT'},marginLeft:{magnitude:72,unit:'PT'},marginRight:{magnitude:72,unit:'PT'}},fields:'marginTop,marginBottom,marginLeft,marginRight'}}]})
     });
 
