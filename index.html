@@ -395,7 +395,7 @@ window.addEventListener('DOMContentLoaded',()=>{
 
 // GOOGLE AUTH
 let googleTokenClient=null;
-let googleTokenCallback=null;
+let googleTokenExpiry=0; // timestamp ms when token expires
 
 function initGoogleClient(){
   if(googleTokenClient)return;
@@ -404,27 +404,46 @@ function initGoogleClient(){
     callback:(r)=>{
       if(r.access_token){
         googleAccessToken=r.access_token;
+        googleTokenExpiry=Date.now()+(((r.expires_in||3500)-60)*1000); // expire 60s early
         const role=roles.find(x=>x.id===selectedId);
         if(role)renderPanel(role);
-        if(googleTokenCallback){googleTokenCallback();googleTokenCallback=null;}
       }
     }
   });
 }
 
-function signInWithGoogle(cb){
+function signInWithGoogle(){
   initGoogleClient();
-  if(cb)googleTokenCallback=cb;
   googleTokenClient.requestAccessToken({prompt:googleAccessToken?'':'select_account'});
 }
 
+// Returns a valid token, refreshing silently if needed
+function getFreshToken(){
+  return new Promise((resolve,reject)=>{
+    initGoogleClient();
+    // If token exists and not expired, return it immediately
+    if(googleAccessToken && Date.now()<googleTokenExpiry){
+      return resolve(googleAccessToken);
+    }
+    // Need fresh token — override callback temporarily
+    const original=googleTokenClient.callback;
+    googleTokenClient.callback=(r)=>{
+      googleTokenClient.callback=original;
+      if(r.access_token){
+        googleAccessToken=r.access_token;
+        googleTokenExpiry=Date.now()+(((r.expires_in||3500)-60)*1000);
+        resolve(googleAccessToken);
+      } else {
+        reject(new Error('Google sign-in failed or was cancelled.'));
+      }
+    };
+    googleTokenClient.requestAccessToken({prompt:googleAccessToken?'none':'select_account'});
+  });
+}
+
 async function googleFetch(url,opts){
-  // Try request; if 401, refresh token and retry once
-  let res=await fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+googleAccessToken}});
-  if(res.status===401){
-    await new Promise(resolve=>signInWithGoogle(resolve));
-    res=await fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+googleAccessToken}});
-  }
+  const token=await getFreshToken();
+  const res=await fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+token}});
   return res;
 }
 
@@ -602,7 +621,7 @@ async function runAnalysis(){
 async function generateCV(){
   const role=roles.find(r=>r.id===selectedId);if(!role)return;
   if(!role.jd)return alert('No job description found.');
-  if(!googleAccessToken)return alert('Please sign in with Google first.');
+  if(!googleAccessToken){signInWithGoogle();return alert('Please sign in with Google and try again.');}
   const btn=document.getElementById('btn-generate'),prog=document.getElementById('cv-progress');
   btn.disabled=true;btn.textContent='⏳ Generating…';prog.classList.add('visible');
   try{
