@@ -433,9 +433,12 @@ function getToken(){
   });
 }
 
+// cvToken is set before generation starts to avoid auth popup mid-generation
+let cvToken=null;
 async function googleFetch(url,opts){
-  const token=await getToken();
-  return fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+token}});
+  const t=cvToken||googleAccessToken;
+  if(!t)throw new Error('No Google token available.');
+  return fetch(url,{...opts,headers:{...opts.headers,'Authorization':'Bearer '+t}});
 }
 
 // HELPERS
@@ -575,11 +578,12 @@ async function callClaude(system,userMsg,maxTokens=1000){
   const k=localStorage.getItem('vp_api_key');
   if(!k)throw new Error('No API key. Click ⚙ Settings.');
   const ctrl=new AbortController();
-  const t=setTimeout(()=>ctrl.abort(),60000);
+  const t=setTimeout(()=>ctrl.abort(),120000);
+  const model=maxTokens>1500?'claude-sonnet-4-6':'claude-haiku-4-5-20251001';
   const res=await fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',signal:ctrl.signal,
     headers:{'Content-Type':'application/json','x-api-key':k,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:maxTokens,system,messages:[{role:'user',content:userMsg}]})
+    body:JSON.stringify({model,max_tokens:maxTokens,system,messages:[{role:'user',content:userMsg}]})
   });
   clearTimeout(t);
   if(!res.ok){const e=await res.text();throw new Error('API '+res.status+': '+e);}
@@ -612,7 +616,17 @@ async function runAnalysis(){
 async function generateCV(){
   const role=roles.find(r=>r.id===selectedId);if(!role)return;
   if(!role.jd)return alert('No job description found.');
-  // Token will be requested fresh inside googleFetch via getToken()
+
+  // Step 0: Get Google token FIRST, before any generation starts
+  // This way the auth popup doesn't eat into the generation timeout
+  let token;
+  try{
+    token=await getToken();
+    cvToken=token; // make available to googleFetch without re-prompting
+  }catch(e){
+    return alert('Google sign-in failed or was cancelled. Please try again.');
+  }
+
   const btn=document.getElementById('btn-generate'),prog=document.getElementById('cv-progress');
   btn.disabled=true;btn.textContent='⏳ Generating…';prog.classList.add('visible');
   try{
@@ -730,9 +744,11 @@ async function generateCV(){
     });
 
     role.cvDocUrl=`https://docs.google.com/document/d/${docId}/edit`;
+    cvToken=null;
     saveRole_db(role);renderPanel(role);renderList();
   }catch(e){
-    alert(e.name==='AbortError'?'Timed out generating CV.':'CV generation failed: '+e.message);
+    cvToken=null;
+    alert(e.name==='AbortError'?'Timed out generating CV — try again.':'CV generation failed: '+e.message);
     btn.disabled=false;btn.textContent=roles.find(r=>r.id===selectedId)?.cvDocUrl?'🔄 Regenerate CV':'📄 Generate Tailored CV → Google Docs';
     prog.classList.remove('visible');
   }
